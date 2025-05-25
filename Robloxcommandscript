@@ -1,0 +1,202 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- Added for KillPlayerEvent
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- References to UI elements
+local screenGui = PlayerGui:WaitForChild("ScreenGui")
+local folder = screenGui:WaitForChild("Folder")
+local frame = folder:WaitForChild("Frame") -- This is TextBox with id Instance_0_3466710
+local commandInputBox = frame:WaitForChild("TextBox")
+local openFrameButton = screenGui:WaitForChild("OpenFrameButton") -- Assuming a TextButton named "OpenFrameButton" exists under ScreenGui
+
+-- Remote Event for Kill Command
+local KillPlayerEvent = ReplicatedStorage:WaitForChild("KillPlayerEvent") -- Added for KillPlayerEvent
+
+-- Initial setup: Hide the command frame
+frame.Visible = false
+
+local character
+local humanoid
+local hrp
+
+local isFlying = false
+local flySpeed = 50
+local flyInstances = {} -- To store BodyGyro, LinearVelocity, Attachment
+
+local function updateCharacterReferences()
+	character = LocalPlayer.Character
+	if not character then return false end
+	humanoid = character:FindFirstChildOfClass("Humanoid")
+	hrp = character:FindFirstChild("HumanoidRootPart")
+	if not (humanoid and hrp) then return false end
+	return true
+end
+
+local function disableFlight()
+	if not isFlying then return end
+	isFlying = false
+
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+
+	if flyInstances.linearVelocity then
+		flyInstances.linearVelocity:Destroy()
+		flyInstances.linearVelocity = nil
+	end
+	if flyInstances.bodyGyro then
+		flyInstances.bodyGyro:Destroy()
+		flyInstances.bodyGyro = nil
+	end
+	if flyInstances.attachment then
+		flyInstances.attachment:Destroy()
+		flyInstances.attachment = nil
+	end
+	print("Flight Disabled")
+end
+
+local function enableFlight()
+	if isFlying then return end
+	if not updateCharacterReferences() or not hrp or not humanoid then
+		print("Cannot enable flight: Character components not found or not ready.")
+		return
+	end
+
+	isFlying = true
+	humanoid.PlatformStand = true -- Helps with physics stability
+
+	-- Attachment
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = hrp
+	flyInstances.attachment = attachment
+
+	-- LinearVelocity for movement
+	local linearVelocity = Instance.new("LinearVelocity")
+	linearVelocity.Attachment0 = attachment
+	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	linearVelocity.MaxAxesForce = Vector3.new(math.huge, math.huge, math.huge)
+	linearVelocity.VectorVelocity = Vector3.new(0, 0, 0)
+	linearVelocity.Parent = hrp
+	flyInstances.linearVelocity = linearVelocity
+
+	-- BodyGyro for orientation
+	local bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.MaxTorque = Vector3.new(0, 400000, 0) -- Control yaw (Y-axis)
+	bodyGyro.P = 5000 -- Proportional gain
+	bodyGyro.D = 100  -- Derivative gain
+	bodyGyro.CFrame = hrp.CFrame
+	bodyGyro.Parent = hrp
+	flyInstances.bodyGyro = bodyGyro
+
+	print("Flight Enabled")
+end
+
+-- Handle TextBox interaction for commands
+local function onTextBoxFocusLost(enterPressed)
+	if enterPressed then
+		local rawText = commandInputBox.Text
+		commandInputBox.Text = "" -- Clear textbox immediately
+
+		local lowerText = string.lower(rawText)
+
+		if lowerText == "fly" then
+			if not isFlying then
+				enableFlight()
+			end
+		elseif string.sub(lowerText, 1, 5) == "kill " then
+			local targetUsername = string.sub(rawText, 6) -- Get the part after "kill "
+			if #targetUsername > 0 then
+				print("Firing KillPlayerEvent for target: " .. targetUsername)
+				KillPlayerEvent:FireServer(targetUsername)
+			else
+				print("Kill command used without a target username.")
+			end
+			-- If flying, and "kill" command is entered, flight remains as is unless explicitly disabled.
+		else -- Any other command or empty text
+			if isFlying then
+				disableFlight() -- Disable flight if an unknown command is entered or text is cleared and enter pressed
+			end
+		end
+	end
+end
+
+commandInputBox.FocusLost:Connect(onTextBoxFocusLost)
+
+-- Handle "Open" button click to toggle frame visibility
+if openFrameButton then
+	openFrameButton.MouseButton1Click:Connect(function()
+		frame.Visible = not frame.Visible
+	end)
+end
+
+RunService.RenderStepped:Connect(function(dt)
+	if isFlying and hrp and flyInstances.linearVelocity and flyInstances.bodyGyro and humanoid and humanoid.Health > 0 then
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+
+		-- Update BodyGyro to face camera direction (horizontal only)
+		local cameraLookVector = camera.CFrame.LookVector
+		local targetLookPosition = hrp.Position + Vector3.new(cameraLookVector.X, 0, cameraLookVector.Z).Unit
+		if (targetLookPosition - hrp.Position).Magnitude > 0.1 then -- Avoid issues with looking straight up/down
+			flyInstances.bodyGyro.CFrame = CFrame.new(hrp.Position, targetLookPosition)
+		end
+
+		-- Movement
+		local moveInputDirection = Vector3.new()
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+			moveInputDirection = moveInputDirection + Vector3.new(0,0,-1) -- Forward relative to camera
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+			moveInputDirection = moveInputDirection + Vector3.new(0,0,1) -- Backward relative to camera
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+			moveInputDirection = moveInputDirection + Vector3.new(-1,0,0) -- Left relative to camera
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+			moveInputDirection = moveInputDirection + Vector3.new(1,0,0) -- Right relative to camera
+		end
+
+		local worldMoveDirection = camera.CFrame:VectorToWorldSpace(moveInputDirection)
+		local finalMoveDirection = Vector3.new(worldMoveDirection.X, 0, worldMoveDirection.Z) -- Horizontal movement
+
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+			finalMoveDirection = finalMoveDirection + Vector3.new(0, 1, 0) -- Up
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+			finalMoveDirection = finalMoveDirection - Vector3.new(0, 1, 0) -- Down
+		end
+
+		if finalMoveDirection.Magnitude > 0 then
+			finalMoveDirection = finalMoveDirection.Unit
+		end
+
+		flyInstances.linearVelocity.VectorVelocity = finalMoveDirection * flySpeed
+	elseif isFlying and (not humanoid or humanoid.Health <= 0) then
+		-- If player dies while flying, or humanoid is lost
+		disableFlight()
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+	disableFlight() -- Ensure flight is off on respawn
+
+	-- Wait for new character components to be ready
+	task.wait() 
+	if not updateCharacterReferences() then
+		print("FlyCommandScript: Failed to update character references on respawn.")
+	end
+	-- Player needs to re-enter "fly" command after respawning
+end)
+
+-- Initial character setup
+if LocalPlayer.Character then
+	updateCharacterReferences()
+else
+	LocalPlayer.CharacterAdded:Once(function()
+		updateCharacterReferences()
+	end)
+end
